@@ -1,0 +1,1 @@
+Get-Item ..\*.png | ForEach-Object {$index=0} { New-Item -ItemType SymbolicLink -Path "Frame$($index.ToString("d3")).png" -Target $_; $index++}    

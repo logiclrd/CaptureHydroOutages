@@ -1,0 +1,7 @@
+﻿{
+  "rules":
+  {
+    "no-inner-declarations": "off",
+    "no-inner": "off"
+  }
+}

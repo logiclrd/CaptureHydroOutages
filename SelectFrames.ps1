@@ -1,0 +1,1 @@
+Copy-Item (Get-ChildItem -Filter "*-updated-*" | ForEach-Object { @{ Path=$_.FullName; Updated=$_.FullName.Split(@("-updated-"), "None")[1] } } | Group-Object -Property { $_.Updated } | ForEach-Object { $_.Group | ForEach-Object { $_.Path } | Get-Item | Sort-Object { $_.Length } | Select -Last 1 }) -Destination Frames\

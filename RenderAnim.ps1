@@ -1,0 +1,1 @@
+. ffmpeg.exe -f image2 -framerate 6 -i 'Frame%03d.png' -c:v libx264 -crf 22 Anim.mkv
