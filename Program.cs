@@ -2,6 +2,7 @@
 using CefSharp.OffScreen;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
@@ -14,14 +15,39 @@ namespace CaptureHydroOutages
 {
 	class Program
 	{
-		const string ManitobaHydroOutagesURL = "https://www.hydro.mb.ca/outages/";
+		const string ManitobaHydroOutagesURL = "https://account.hydro.mb.ca/Portal/outeroutage.aspx";
+
+		static void DoLog(Action<TextWriter> action)
+		{
+			for (int i = 0; i < 5; i++)
+			{
+				try
+				{
+					using (var log = new StreamWriter("CaptureHydroOutages.log", append: true) { AutoFlush = true })
+						action(log);
+
+					break;
+				}
+				catch { }
+
+				Thread.Sleep(100);
+			}
+		}
+
+		static void Log(string text)
+		{
+			DoLog(writer => writer.WriteLine($"[{Process.GetCurrentProcess().Id}] {text}"));
+		}
+
+		static void Log(string format, params object[] args)
+		{
+			Log(string.Format(format, args));
+		}
 
 		static async Task Main(string[] args)
 		{
-			var log = new StreamWriter("CaptureHydroOutages.log", append: true) { AutoFlush = true };
-
-			log.WriteLine("=================");
-			log.WriteLine("Starting at: {0}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fffffff"));
+			Log("=================");
+			Log("Starting at: {0}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fffffff"));
 
 			Bitmap screenshotBitmap = null;
 
@@ -31,7 +57,7 @@ namespace CaptureHydroOutages
 
 			var requestContextSettings = new RequestContextSettings();
 
-			requestContextSettings.CachePath = "cache";
+			requestContextSettings.CachePath = Path.GetFullPath("cache");
 
 			using (var requestContext = new RequestContext(requestContextSettings))
 			using (var browser = new ChromiumWebBrowser(ManitobaHydroOutagesURL, browserSettings, requestContext))
@@ -40,16 +66,20 @@ namespace CaptureHydroOutages
 
 				var token = Guid.NewGuid().ToString();
 
+				// SignalScript doesn't seem to be working with the new embedding, which uses an IFRAME.
+				/*
 				string SignalScript = new StreamReader(typeof(Program).Assembly.GetManifestResourceStream("CaptureHydroOutages.SignalScript.js")).ReadToEnd().Replace("TOKEN", token);
 
 				browser.ConsoleMessage +=
 					(sender, e) =>
 					{
+						Debug.WriteLine(e.Message);
+
 						int tokenOffset = e.Message.IndexOf(token);
 
 						if (tokenOffset >= 0)
 						{
-							log.WriteLine("SIGNAL FROM SCRIPT: " + e.Message);
+							Log("SIGNAL FROM SCRIPT: " + e.Message);
 
 							string message = e.Message.Substring(tokenOffset + token.Length).Split(new[] { '|' }, StringSplitOptions.RemoveEmptyEntries).First();
 
@@ -57,20 +87,25 @@ namespace CaptureHydroOutages
 								Task.Delay(100).ContinueWith((task) => browser.ExecuteScriptAsyncWhenPageLoaded(SignalScript));
 							else
 							{
-								log.WriteLine("UNBLOCKING");
+								Log("UNBLOCKING");
 
 								blocker.Release();
 
 								if (message == "error")
 								{
 									string error = e.Message.Split(new[] { token }, StringSplitOptions.None)[1].Split('|').Last();
-									log.WriteLine("ERROR FROM SCRIPT: " + error);
+									Log("ERROR FROM SCRIPT: " + error);
 								}
 							}
 						}
 					};
 
-				browser.ExecuteScriptAsyncWhenPageLoaded(SignalScript);
+				browser.FrameLoadStart +=
+					(sender, e) =>
+					{
+						e.Frame.ExecuteJavaScriptAsync(SignalScript);
+					};
+				*/
 
 				browser.Size = new Size(1920, 2000);
 
@@ -80,29 +115,43 @@ namespace CaptureHydroOutages
 
 				var waiter = new ManualResetEvent(initialState: false);
 
+				object sync = new object();
+
 				async void TakeScreenshot()
 				{
-					log.WriteLine("TakeScreenshot(): Registering for notification of the next render");
+					bool requireFreshRender = false;
 
-					var bitmap = await browser.ScreenshotAsync(ignoreExistingScreenshot: true, PopupBlending.Main);
+					Log("TakeScreenshot(): Registering for notification of the next render");
 
-					if (bitmap == null)
-						log.WriteLine("TakeScreenshot(): Did not receive a bitmap from the render process");
-					else
+					while (true)
 					{
-						log.WriteLine("TakeScreenshot(): Received bitmap from render process");
+						var bitmap = await browser.ScreenshotAsync(ignoreExistingScreenshot: requireFreshRender, PopupBlending.Main);
 
-						screenshotBitmap?.Dispose();
-						screenshotBitmap = (Bitmap)bitmap.Clone();
+						requireFreshRender = true;
 
-						gracePeriodEnd = DateTime.UtcNow + GracePeriodDuration;
+						if (bitmap == null)
+						{
+							Log("TakeScreenshot(): Did not receive a bitmap from the render process");
+							break;
+						}
+						else
+						{
+							Log("TakeScreenshot(): Received bitmap from render process");
 
-						waiter.Set();
+							lock (sync)
+							{
+								screenshotBitmap?.Dispose();
+								screenshotBitmap = (Bitmap)bitmap.Clone();
+							}
+
+							gracePeriodEnd = DateTime.UtcNow + GracePeriodDuration;
+
+							waiter.Set();
+						}
 					}
-
-					TakeScreenshot();
 				}
 
+				/*
 				DateTime refreshViewAfter = DateTime.UtcNow.AddSeconds(20);
 				int refreshCount = 0;
 
@@ -114,13 +163,13 @@ namespace CaptureHydroOutages
 					{
 						if (refreshCount >= 5)
 						{
-							log.WriteLine("ERROR: Tried refreshing {0} times, failed to receive semaphore signal from script, aborting, no image captured at {1}", refreshCount, DateTime.Now);
+							Log("ERROR: Tried refreshing {0} times, failed to receive semaphore signal from script, aborting, no image captured at {1}", refreshCount, DateTime.Now);
 							Environment.Exit(1);
 						}
 
 						refreshCount++;
 
-						log.WriteLine("WARNING: Gave up on receiving the initialization token at {0}, beginning reload attempt {1}", DateTime.Now, refreshCount);
+						Log("WARNING: Gave up on receiving the initialization token at {0}, beginning reload attempt {1}", DateTime.Now, refreshCount);
 
 						browser.Reload();
 						browser.ExecuteScriptAsyncWhenPageLoaded(SignalScript);
@@ -136,13 +185,21 @@ namespace CaptureHydroOutages
 						break;
 				}
 
-				log.WriteLine("TOKEN RECEIVED, BEGINNING SCREENSHOTS, WILL WAIT UNTIL 5 SECONDS ELAPSE WITH NO SCREENSHOT");
+				Log("TOKEN RECEIVED, BEGINNING SCREENSHOTS, WILL WAIT UNTIL 5 SECONDS ELAPSE WITH NO SCREENSHOT");
+				*/
+				Log("Waiting 20 seconds");
+
+				Thread.Sleep(TimeSpan.FromSeconds(20));
+
+				Log("Beginning screenshots");
 
 				TakeScreenshot();
 
 				await waiter.AsTask();
 
-				log.WriteLine("WOKEN UP");
+				Log("WOKEN UP");
+
+				Bitmap capturedScreenshot = null;
 
 				while (true)
 				{
@@ -151,17 +208,24 @@ namespace CaptureHydroOutages
 					if (remaining <= TimeSpan.Zero)
 						break;
 
-					log.WriteLine("WAITING {0}", remaining);
+					Log("WAITING {0}", remaining);
 
 					await Task.Delay(remaining);
+
+					lock (sync)
+					{
+						capturedScreenshot = screenshotBitmap;
+						screenshotBitmap = null;
+					}
 				}
 
 				string fileName = "screenshot-captured-" + DateTime.Now.ToString("yyyyMMdd_HHmm");
 
-				if (screenshotBitmap == null)
-					log.WriteLine("ERROR: Did not manage to capture a screenshot");
+				if (capturedScreenshot == null)
+					Log("ERROR: Did not manage to capture a screenshot");
 				else
 				{
+					/*
 					await browser
 						.EvaluateScriptAsync("document.getElementsByClassName('last_updated')[0].innerText")
 						.ContinueWith(
@@ -176,17 +240,26 @@ namespace CaptureHydroOutages
 									formattedDateTimeString = formattedDateTimeString.Replace("a.m.", "AM");
 									formattedDateTimeString = formattedDateTimeString.Replace("p.m.", "PM");
 
-									var lastUpdatedDateTime = DateTime.ParseExact(formattedDateTimeString, format: "dddd, MMMM d 'at' h:mm tt", CultureInfo.InvariantCulture);
+									try
+									{
+										var lastUpdatedDateTime = DateTime.ParseExact(formattedDateTimeString, format: "dddd, MMMM d 'at' h:mm tt", CultureInfo.InvariantCulture);
 
-									fileName += "-updated-" + lastUpdatedDateTime.ToString("yyyyMMdd_HHmm");
+										fileName += "-updated-" + lastUpdatedDateTime.ToString("yyyyMMdd_HHmm");
+									}
+									catch (Exception e)
+									{
+										Log("ERROR: Did not manage to determine when the data set was last updated, formatted date/time string: " + formattedDateTimeString);
+										Log("=> " + e);
+									}
 								}
 								else
-									log.WriteLine("ERROR: Did not manage to determine when the data set was last updated");
+									Log("ERROR: Did not manage to determine when the data set was last updated");
 							});
+					*/
 
 					await browser
 						.EvaluateScriptAsync(@"
-var rect = document.getElementById('outagemap').getBoundingClientRect();
+var rect = document.getElementById('outage_map_canvas').getBoundingClientRect();
 
 rect.left += window.scrollX;
 rect.top += window.scrollY;
@@ -201,7 +274,7 @@ rect.top += window.scrollY;
 								{
 									string rectString = response.Result.ToString();
 
-									log.WriteLine("Received bounding rectangle: {0}", rectString);
+									Log("Received bounding rectangle: {0}", rectString);
 
 									string[] parts = rectString.Split(',');
 
@@ -212,34 +285,34 @@ rect.top += window.scrollY;
 
 									if ((top < bottom) && (left < right)
 									 && (top >= 0) && (left >= 0)
-									 && (bottom <= screenshotBitmap.Height) && (right <= screenshotBitmap.Width))
+									 && (bottom <= capturedScreenshot.Height) && (right <= capturedScreenshot.Width))
 									{
-										log.WriteLine("=> Cropping screenshot");
+										Log("=> Cropping screenshot");
 
 										int width = right - left;
 										int height = bottom - top;
 
-										var cropped = new Bitmap(width, height, screenshotBitmap.PixelFormat);
+										var cropped = new Bitmap(width, height, capturedScreenshot.PixelFormat);
 
 										using (var g = Graphics.FromImage(cropped))
 										{
 											g.DrawImage(
-												screenshotBitmap,
+												capturedScreenshot,
 												destRect: new Rectangle(0, 0, width, height),
 												srcRect: new Rectangle(left, top, width, height),
 												srcUnit: GraphicsUnit.Pixel);
 										}
 
-										screenshotBitmap.Dispose();
-										screenshotBitmap = cropped;
+										capturedScreenshot.Dispose();
+										capturedScreenshot = cropped;
 									}
 								}
 							});
 				}
 
-				log.WriteLine("SAVING: " + fileName);
+				Log("SAVING: " + fileName);
 
-				screenshotBitmap.Save(fileName + ".png");
+				capturedScreenshot.Save(fileName + ".png");
 			}
 		}
 	}

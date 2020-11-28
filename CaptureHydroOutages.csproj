@@ -63,13 +63,16 @@
     <None Include=".editorconfig" />
     <None Include=".eslintrc" />
     <None Include="App.config" />
+    <None Include="CreateFrameLinks.ps1" />
+    <None Include="RenderAnim.ps1" />
+    <None Include="SelectFrames.ps1" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="CefSharp.Common">
-      <Version>75.1.142</Version>
+      <Version>86.0.241</Version>
     </PackageReference>
     <PackageReference Include="CefSharp.OffScreen">
-      <Version>75.1.142</Version>
+      <Version>86.0.241</Version>
     </PackageReference>
   </ItemGroup>
   <ItemGroup>
